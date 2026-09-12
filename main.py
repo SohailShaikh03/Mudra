@@ -30,8 +30,11 @@ try:
 except Exception:
     translator = None
 
-# TensorFlow / Keras
-from tensorflow import keras
+# Optional TensorFlow / Keras (Falls back to pure NumPy weights for lightning performance)
+try:
+    from tensorflow import keras
+except Exception:
+    keras = None
 
 # ==========================================
 # PAGE CONFIGURATION & SIGNATURE THEME
@@ -212,15 +215,25 @@ st.markdown("""
 # ==========================================
 @st.cache_resource(show_spinner="Initializing ISL Deep Learning Engine...")
 def load_model_isl():
-    """Loads the pre-trained Indian Sign Language Keras model."""
-    candidates = ["model_isl_fixed.h5", "model_isl.h5"]
-    for path in candidates:
-        if os.path.exists(path):
-            try:
-                loaded = keras.models.load_model(path)
-                return loaded, path
-            except Exception:
-                pass
+    """Loads the pre-trained Indian Sign Language model (NumPy weights or Keras)."""
+    # 1. Fast path: Pure NumPy weights (lightweight, instant, zero TensorFlow required)
+    if os.path.exists("isl_weights.npz"):
+        try:
+            weights = np.load("isl_weights.npz")
+            return {"type": "numpy", "weights": weights}, "isl_weights.npz"
+        except Exception:
+            pass
+
+    # 2. Fallback: Keras model if TensorFlow is installed
+    if keras is not None:
+        candidates = ["model_isl_fixed.h5", "model_isl.h5"]
+        for path in candidates:
+            if os.path.exists(path):
+                try:
+                    loaded = keras.models.load_model(path)
+                    return {"type": "keras", "model": loaded}, path
+                except Exception:
+                    pass
     return None, None
 
 model, loaded_model_path = load_model_isl()
@@ -277,8 +290,24 @@ def predict_sign(landmark_vector):
     if model is None:
         return "-", 0.0
     try:
-        df = pd.DataFrame([landmark_vector])
-        preds = model.predict(df, verbose=0)[0]
+        if isinstance(model, tuple):
+            loaded_obj = model[0]
+        else:
+            loaded_obj = model
+
+        if isinstance(loaded_obj, dict) and loaded_obj.get("type") == "numpy":
+            w = loaded_obj["weights"]
+            x = np.array([landmark_vector], dtype=np.float32)
+            h1 = np.maximum(0, np.dot(x, w['w1']) + w['b1'])
+            h2 = np.maximum(0, np.dot(h1, w['w2']) + w['b2'])
+            logits = np.dot(h2, w['w3']) + w['b3']
+            exp_logits = np.exp(logits - np.max(logits))
+            preds = (exp_logits / np.sum(exp_logits))[0]
+        else:
+            kmodel = loaded_obj["model"] if isinstance(loaded_obj, dict) else loaded_obj
+            df = pd.DataFrame([landmark_vector])
+            preds = kmodel.predict(df, verbose=0)[0]
+
         idx = int(np.argmax(preds))
         conf = float(preds[idx])
         return ISL_ALPHABET[idx], conf
