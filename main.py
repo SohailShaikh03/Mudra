@@ -183,7 +183,7 @@ st.markdown("""
     }
 
     /* Primary Accent Buttons */
-    div.stButton > button[kind="primary"] {
+    div.stButton > button[kind="primary"], div.stButton > button[data-testid="baseButton-primary"] {
         background: linear-gradient(135deg, #F59E0B 0%, #D97706 100%) !important;
         color: #FFFFFF !important;
         border: none !important;
@@ -686,7 +686,7 @@ with main_col_right:
     st.markdown("### 🔊 Voice & Translation Studio")
     audio_col1, audio_col2 = st.columns([1, 1])
 
-    speak_clicked = audio_col1.button("🎙️ Speak Sentence", kind="primary", use_container_width=True)
+    speak_clicked = audio_col1.button("🎙️ Speak Sentence", type="primary", use_container_width=True)
     copy_clicked = audio_col2.button("📋 Copy Text", use_container_width=True)
 
     if copy_clicked and sentence_str:
