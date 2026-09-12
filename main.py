@@ -361,9 +361,11 @@ class ISLWebRtcProcessor(VideoProcessorBase):
             min_detection_confidence=0.7,
             min_tracking_confidence=0.7
         )
-        self.recent_predictions = deque(maxlen=10)
         self.current_char = "-"
         self.current_conf = 0.0
+        self.candidate_char = None
+        self.consecutive_count = 0
+        self.committed_chars = []
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
@@ -397,14 +399,24 @@ class ISLWebRtcProcessor(VideoProcessorBase):
                 cv2.putText(img, f"{char_detected}", (30, 70), cv2.FONT_HERSHEY_DUPLEX, 1.8, (245, 158, 11), 3)
                 cv2.putText(img, f"{int(conf_detected*100)}%", (125, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (6, 182, 212), 2)
 
-        # Thread-safe update of current state
+        # Thread-safe update of current state & debouncing
         with self.lock:
             self.current_char = char_detected
             self.current_conf = conf_detected
+
             if char_detected != "-" and conf_detected >= 0.65:
-                self.recent_predictions.append(char_detected)
+                if char_detected == self.candidate_char:
+                    self.consecutive_count += 1
+                else:
+                    self.candidate_char = char_detected
+                    self.consecutive_count = 1
+
+                # Commit sign after 8 consecutive stable frames (~0.25-0.35s hold)
+                if self.consecutive_count == 8:
+                    self.committed_chars.append(char_detected)
             else:
-                self.recent_predictions.append(None)
+                self.consecutive_count = 0
+                self.candidate_char = None
 
         return av.VideoFrame.from_ndarray(img, format="bgr24") if HAS_WEBRTC else frame
 
@@ -520,21 +532,7 @@ with main_col_left:
             async_processing=True,
         )
 
-        # Pull predictions from processor
-        if webrtc_ctx.video_processor:
-            with webrtc_ctx.video_processor.lock:
-                history = list(webrtc_ctx.video_processor.recent_predictions)
-            
-            # Check stability in sliding window
-            if len(history) >= st.session_state.stability_frames_req:
-                valid_items = [x for x in history if x is not None and x != "-"]
-                if valid_items:
-                    most_common = max(set(valid_items), key=valid_items.count)
-                    if valid_items.count(most_common) >= (st.session_state.stability_frames_req - 2):
-                        if not st.session_state.sentence or st.session_state.sentence[-1] != most_common:
-                            st.session_state.sentence.append(most_common)
-                            st.session_state.last_committed_char = most_common
-                            st.toast(f"Captured: {most_common}", icon="✨")
+        pass
 
     else:
         # LOCAL OPENCV CAMERA MODE
@@ -643,25 +641,22 @@ with main_col_left:
 with main_col_right:
     st.markdown("### ✍️ Sentence Studio")
     
-    # Render constructed sentence
-    sentence_tokens = st.session_state.sentence
-    if sentence_tokens:
-        tokens_html = ""
-        for token in sentence_tokens:
-            if token == " ":
-                tokens_html += '<span class="space-token">␣ SPACE</span>'
-            else:
-                tokens_html += f'<span class="letter-token">{token}</span>'
-        sentence_str = "".join(sentence_tokens)
-    else:
-        tokens_html = '<span style="color: #64748B; font-style: italic;">No gestures recognized yet. Make a sign in front of the camera...</span>'
-        sentence_str = ""
+    # Dynamic Sentence Display Box
+    def get_sentence_box_html(tokens):
+        if tokens:
+            tokens_html = ""
+            for token in tokens:
+                if token == " ":
+                    tokens_html += '<span class="space-token">␣ SPACE</span>'
+                else:
+                    tokens_html += f'<span class="letter-token">{token}</span>'
+        else:
+            tokens_html = '<span style="color: #64748B; font-style: italic;">No gestures recognized yet. Make a sign in front of the camera...</span>'
+        return f'<div class="sentence-display-box">{tokens_html}</div>'
 
-    st.markdown(f"""
-    <div class="sentence-display-box">
-        {tokens_html}
-    </div>
-    """, unsafe_allow_html=True)
+    sentence_box_placeholder = st.empty()
+    sentence_box_placeholder.markdown(get_sentence_box_html(st.session_state.sentence), unsafe_allow_html=True)
+    live_badge_placeholder = st.empty()
     
     # Action Toolbar
     st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
@@ -689,6 +684,7 @@ with main_col_right:
     speak_clicked = audio_col1.button("🎙️ Speak Sentence", type="primary", use_container_width=True)
     copy_clicked = audio_col2.button("📋 Copy Text", use_container_width=True)
 
+    sentence_str = "".join(st.session_state.sentence)
     if copy_clicked and sentence_str:
         st.toast(f"Copied to clipboard: \"{sentence_str}\"", icon="📋")
 
@@ -760,3 +756,40 @@ st.markdown("""
     Powered by MediaPipe Hands, TensorFlow, and Streamlit Community Cloud
 </div>
 """, unsafe_allow_html=True)
+
+# ==========================================
+# REAL-TIME WEBRTC GESTURE CAPTURE LOOP
+# ==========================================
+if "Web Browser Camera" in chosen_camera_mode and HAS_WEBRTC and webrtc_ctx.state.playing:
+    while webrtc_ctx.state.playing:
+        if webrtc_ctx.video_processor:
+            with webrtc_ctx.video_processor.lock:
+                live_c = webrtc_ctx.video_processor.current_char
+                live_conf = webrtc_ctx.video_processor.current_conf
+                new_signs = list(webrtc_ctx.video_processor.committed_chars)
+                webrtc_ctx.video_processor.committed_chars.clear()
+
+            # Real-time HUD pill in Sentence Studio
+            if live_c != "-" and live_conf >= 0.60:
+                live_badge_placeholder.markdown(f"""
+                <div style="margin-top: 10px; display: inline-flex; align-items: center; gap: 8px; background: rgba(6, 182, 212, 0.15); border: 1px solid rgba(6, 182, 212, 0.35); border-radius: 8px; padding: 4px 12px;">
+                    <span style="color: #38BDF8; font-weight: 700; font-size: 1.05rem;">Detected: {live_c}</span>
+                    <span style="color: #94A3B8; font-size: 0.85rem;">({int(live_conf*100)}% match)</span>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                live_badge_placeholder.empty()
+
+            # Register held signs into the sentence
+            if new_signs:
+                updated = False
+                for sign in new_signs:
+                    if not st.session_state.sentence or st.session_state.sentence[-1] != sign:
+                        st.session_state.sentence.append(sign)
+                        st.toast(f"Captured: {sign}", icon="✨")
+                        updated = True
+                if updated:
+                    sentence_box_placeholder.markdown(get_sentence_box_html(st.session_state.sentence), unsafe_allow_html=True)
+
+        time.sleep(0.08)
+
