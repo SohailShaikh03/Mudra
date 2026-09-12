@@ -239,9 +239,19 @@ def load_model_isl():
 model, loaded_model_path = load_model_isl()
 
 # Initialize MediaPipe Hands
-mp_hands = mp.solutions.hands
-mp_drawing = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
+try:
+    from mediapipe.python.solutions import hands as mp_hands
+    from mediapipe.python.solutions import drawing_utils as mp_drawing
+    from mediapipe.python.solutions import drawing_styles as mp_drawing_styles
+except Exception:
+    try:
+        mp_hands = mp.solutions.hands
+        mp_drawing = mp.solutions.drawing_utils
+        mp_drawing_styles = mp.solutions.drawing_styles
+    except Exception:
+        import mediapipe.solutions.hands as mp_hands
+        import mediapipe.solutions.drawing_utils as mp_drawing
+        import mediapipe.solutions.drawing_styles as mp_drawing_styles
 
 # ISL Alphabet definition: 9 numbers ('1'-'9') + 26 uppercase letters ('A'-'Z') = 35 classes
 ISL_ALPHABET = [str(i) for i in range(1, 10)] + list(string.ascii_uppercase)
