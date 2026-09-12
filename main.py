@@ -4,223 +4,720 @@ import mediapipe as mp
 import numpy as np
 import pandas as pd
 import string
-from tensorflow import keras
-from gtts import gTTS
+import os
+import threading
 from io import BytesIO
+from collections import deque
+from gtts import gTTS
 
-# --- Model and MediaPipe Setup ---
+# Optional cloud WebRTC support for Web/Mobile browser camera
+try:
+    import av
+    from streamlit_webrtc import (
+        webrtc_streamer,
+        VideoProcessorBase,
+        RTCConfiguration,
+        WebRtcMode,
+    )
+    HAS_WEBRTC = True
+except Exception:
+    HAS_WEBRTC = False
 
-# Cache the Keras model to avoid reloading on each run
-@st.cache_resource
+# Optional translator
+try:
+    from googletrans import Translator
+    translator = Translator()
+except Exception:
+    translator = None
+
+# TensorFlow / Keras
+from tensorflow import keras
+
+# ==========================================
+# PAGE CONFIGURATION & SIGNATURE THEME
+# ==========================================
+st.set_page_config(
+    page_title="Mudra: ISL Real-Time Translator",
+    page_icon="🤟",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom Signature Cyber-Saffron & Obsidian CSS
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Fira+Code:wght@400;600&display=swap');
+
+    /* Global Typography & Background Glow */
+    html, body, [class*="css"] {
+        font-family: 'Plus Jakarta Sans', sans-serif;
+    }
+    
+    .stApp {
+        background: radial-gradient(circle at 50% 0%, #151D2E 0%, #0B0F19 75%);
+        color: #F3F4F6;
+    }
+
+    /* Branded Header Styling */
+    .brand-hero {
+        background: linear-gradient(135deg, rgba(245, 158, 11, 0.12) 0%, rgba(6, 182, 212, 0.08) 100%);
+        border: 1px solid rgba(245, 158, 11, 0.25);
+        border-radius: 16px;
+        padding: 24px 28px;
+        margin-bottom: 24px;
+        backdrop-filter: blur(12px);
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+    }
+    
+    .brand-title {
+        font-family: 'Outfit', sans-serif;
+        font-size: 2.6rem;
+        font-weight: 800;
+        background: linear-gradient(90deg, #FBBF24 0%, #F59E0B 50%, #EF4444 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        letter-spacing: -0.5px;
+        margin: 0;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+    }
+
+    .brand-sub {
+        color: #94A3B8;
+        font-size: 1.05rem;
+        margin-top: 6px;
+        font-weight: 400;
+    }
+
+    .author-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: rgba(245, 158, 11, 0.15);
+        color: #FBBF24;
+        border: 1px solid rgba(245, 158, 11, 0.3);
+        border-radius: 9999px;
+        padding: 4px 12px;
+        font-size: 0.8rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-top: 10px;
+    }
+
+    /* Status Pill Chips */
+    .status-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: rgba(16, 185, 129, 0.12);
+        color: #34D399;
+        border: 1px solid rgba(16, 185, 129, 0.25);
+        border-radius: 8px;
+        padding: 4px 10px;
+        font-size: 0.8rem;
+        font-weight: 600;
+    }
+
+    /* Glassmorphic Surface Cards */
+    .glass-card {
+        background: rgba(22, 31, 48, 0.65);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 14px;
+        padding: 20px;
+        backdrop-filter: blur(14px);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+        margin-bottom: 20px;
+    }
+
+    /* Sentence Studio Container */
+    .sentence-display-box {
+        background: #0D131F;
+        border: 1px solid rgba(245, 158, 11, 0.35);
+        border-radius: 12px;
+        padding: 18px 22px;
+        min-height: 80px;
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px;
+        font-family: 'Fira Code', monospace;
+        font-size: 1.35rem;
+        color: #F8FAFC;
+        box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.4);
+    }
+
+    .letter-token {
+        background: rgba(245, 158, 11, 0.2);
+        border: 1px solid #F59E0B;
+        color: #FDE68A;
+        border-radius: 6px;
+        padding: 2px 10px;
+        font-weight: 600;
+    }
+
+    .space-token {
+        background: rgba(255, 255, 255, 0.08);
+        color: #64748B;
+        border-radius: 4px;
+        padding: 2px 6px;
+        font-size: 0.85rem;
+    }
+
+    /* Streamlit Button Tweaks & Touch Targets */
+    div.stButton > button {
+        border-radius: 10px !important;
+        font-weight: 600 !important;
+        min-height: 48px !important;
+        transition: all 0.2s ease-in-out !important;
+        border: 1px solid rgba(255, 255, 255, 0.12) !important;
+    }
+
+    div.stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.3) !important;
+    }
+
+    /* Primary Accent Buttons */
+    div.stButton > button[kind="primary"] {
+        background: linear-gradient(135deg, #F59E0B 0%, #D97706 100%) !important;
+        color: #FFFFFF !important;
+        border: none !important;
+        box-shadow: 0 4px 14px rgba(245, 158, 11, 0.35) !important;
+    }
+
+    /* Responsive Mobile Adjustments */
+    @media (max-width: 768px) {
+        .brand-title {
+            font-size: 1.85rem;
+        }
+        .brand-hero {
+            padding: 16px 18px;
+        }
+        .sentence-display-box {
+            font-size: 1.15rem;
+            min-height: 65px;
+        }
+        div.stButton > button {
+            min-height: 50px !important;
+            font-size: 0.95rem !important;
+        }
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# ==========================================
+# MODEL & MEDIAPIPE INITIALIZATION
+# ==========================================
+@st.cache_resource(show_spinner="Initializing ISL Deep Learning Engine...")
 def load_model_isl():
-    """Loads the pre-trained ISL model."""
-    try:
-        return keras.models.load_model("model_isl_fixed.h5")
-    except Exception as e:
-        st.error(f"Error loading model: {e}")
-        st.error("Please ensure 'model_isl_fixed.h5' is in the same directory.")
-        return None
+    """Loads the pre-trained Indian Sign Language Keras model."""
+    candidates = ["model_isl_fixed.h5", "model_isl.h5"]
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                loaded = keras.models.load_model(path)
+                return loaded, path
+            except Exception:
+                pass
+    return None, None
 
-# Load the model once
-model = load_model_isl()
+model, loaded_model_path = load_model_isl()
 
-# Initialize MediaPipe Hands solution
+# Initialize MediaPipe Hands
 mp_hands = mp.solutions.hands
 mp_drawing = mp.solutions.drawing_utils
 mp_drawing_styles = mp.solutions.drawing_styles
 
-# Define the character set for ISL (A-Z and 1-9)
-isl_alphabet = ['1','2','3','4','5','6','7','8','9'] + list(string.ascii_uppercase)
+# ISL Alphabet definition: 9 numbers ('1'-'9') + 26 uppercase letters ('A'-'Z') = 35 classes
+ISL_ALPHABET = [str(i) for i in range(1, 10)] + list(string.ascii_uppercase)
 
-# --- Session State Initialization ---
-# Persist variables across reruns
-
+# ==========================================
+# SESSION STATE MANAGEMENT
+# ==========================================
 if "sentence" not in st.session_state:
     st.session_state.sentence = []
-if "last_prediction" not in st.session_state:
-    st.session_state.last_prediction = None
-if "count" not in st.session_state:
-    st.session_state.count = 0
-if "camera_active" not in st.session_state:
-    st.session_state.camera_active = False
+if "last_committed_char" not in st.session_state:
+    st.session_state.last_committed_char = None
 if "voice_language" not in st.session_state:
     st.session_state.voice_language = "English"
+if "camera_active" not in st.session_state:
+    st.session_state.camera_active = False
+if "local_camera_running" not in st.session_state:
+    st.session_state.local_camera_running = False
+if "confidence_threshold" not in st.session_state:
+    st.session_state.confidence_threshold = 0.65
+if "stability_frames_req" not in st.session_state:
+    st.session_state.stability_frames_req = 8
 
-# --- Utility Functions ---
-
+# ==========================================
+# UTILITY ALGORITHMS & PREPROCESSING
+# ==========================================
 def calc_landmark_list(image, landmarks):
-    """Converts MediaPipe landmarks to a list of pixel coordinates."""
+    """Converts MediaPipe normalized landmarks to pixel coordinates."""
     image_width, image_height = image.shape[1], image.shape[0]
     return [[int(lm.x * image_width), int(lm.y * image_height)] for lm in landmarks.landmark]
 
 def pre_process_landmark(landmarks):
-    """Normalizes landmarks to make them translation and scale invariant."""
+    """Normalizes landmarks to be translation and scale invariant (42 numerical features)."""
     base_x, base_y = landmarks[0]
     relative_landmarks = [[x - base_x, y - base_y] for x, y in landmarks]
-    flat_landmarks = np.array(relative_landmarks).flatten()
+    flat_landmarks = np.array(relative_landmarks, dtype=np.float32).flatten()
     
     max_val = np.max(np.abs(flat_landmarks))
     if max_val == 0:
-        max_val = 1
+        max_val = 1.0
         
     normalized_landmarks = flat_landmarks / max_val
     return normalized_landmarks.tolist()
 
 def predict_sign(landmark_vector):
-    """Predicts the sign character from the landmark vector."""
+    """Predicts character and returns (predicted_char, confidence_score)."""
     if model is None:
-        return ""
-    df = pd.DataFrame([landmark_vector])
-    prediction = model.predict(df, verbose=0)
-    predicted_char_index = np.argmax(prediction)
-    return isl_alphabet[predicted_char_index]
-
-def text_to_speech(text, lang_code):
-    """Generates audio from text using gTTS and returns it as bytes."""
-    if not text.strip():
-        st.warning("There is no text to speak.")
-        return None
+        return "-", 0.0
     try:
-        tts = gTTS(text=text, lang=lang_code, slow=False)
+        df = pd.DataFrame([landmark_vector])
+        preds = model.predict(df, verbose=0)[0]
+        idx = int(np.argmax(preds))
+        conf = float(preds[idx])
+        return ISL_ALPHABET[idx], conf
+    except Exception:
+        return "-", 0.0
+
+def translate_and_speak(text, lang_name):
+    """Translates text if needed and synthesizes audio via gTTS."""
+    if not text.strip():
+        return None, text
+    
+    lang_map = {"English": "en", "Hindi": "hi", "Marathi": "mr"}
+    lang_code = lang_map.get(lang_name, "en")
+    
+    translated_text = text
+    if lang_code != "en" and translator is not None:
+        try:
+            res = translator.translate(text, dest=lang_code)
+            translated_text = res.text
+        except Exception:
+            translated_text = text
+
+    try:
+        tts = gTTS(text=translated_text, lang=lang_code, slow=False)
         audio_fp = BytesIO()
         tts.write_to_fp(audio_fp)
         audio_fp.seek(0)
-        return audio_fp.read()
-    except Exception as e:
-        st.error(f"Could not generate audio: {e}")
-        return None
-
-# --- Streamlit UI ---
-
-def main():
-    """Main function to run the Streamlit app."""
-    st.title("🙌👌 MUDRA - ISL Translator")
-    st.sidebar.header("Settings ⚙️")
-
-    # Optional: Display a logo in the sidebar with a fallback
-    try:
-        st.sidebar.image("Poster_Logo.png", use_container_width=True)
+        return audio_fp.read(), translated_text
     except Exception:
-        st.sidebar.warning("Logo image not found.")
+        return None, translated_text
 
-    # --- Controls in Sidebar ---
-    st.sidebar.markdown("---")
-    st.session_state.voice_language = st.sidebar.selectbox(
-        "Select Voice Language",
-        ("English", "Hindi", "Marathi"),
-        key="lang_select"
+# ==========================================
+# WEBRTC VIDEO PROCESSOR (CLOUD / PHONE / BROWSER)
+# ==========================================
+class ISLWebRtcProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.hands = mp_hands.Hands(
+            model_complexity=0,
+            max_num_hands=1,
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.7
+        )
+        self.recent_predictions = deque(maxlen=10)
+        self.current_char = "-"
+        self.current_conf = 0.0
+
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        img = cv2.flip(img, 1)
+
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        results = self.hands.process(img_rgb)
+
+        char_detected = "-"
+        conf_detected = 0.0
+
+        if results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                # Calculate coordinates and run inference
+                landmark_list = calc_landmark_list(img, hand_landmarks)
+                norm_vector = pre_process_landmark(landmark_list)
+                char_detected, conf_detected = predict_sign(norm_vector)
+
+                # Draw glowing custom skeleton
+                mp_drawing.draw_landmarks(
+                    img,
+                    hand_landmarks,
+                    mp_hands.HAND_CONNECTIONS,
+                    mp_drawing.DrawingSpec(color=(245, 158, 11), thickness=2, circle_radius=3),
+                    mp_drawing.DrawingSpec(color=(6, 182, 212), thickness=2)
+                )
+
+                # HUD Overlay on frame
+                cv2.rectangle(img, (15, 15), (210, 85), (15, 23, 42), -1)
+                cv2.rectangle(img, (15, 15), (210, 85), (245, 158, 11), 2)
+                cv2.putText(img, f"{char_detected}", (30, 70), cv2.FONT_HERSHEY_DUPLEX, 1.8, (245, 158, 11), 3)
+                cv2.putText(img, f"{int(conf_detected*100)}%", (125, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (6, 182, 212), 2)
+
+        # Thread-safe update of current state
+        with self.lock:
+            self.current_char = char_detected
+            self.current_conf = conf_detected
+            if char_detected != "-" and conf_detected >= 0.65:
+                self.recent_predictions.append(char_detected)
+            else:
+                self.recent_predictions.append(None)
+
+        return av.VideoFrame.from_ndarray(img, format="bgr24") if HAS_WEBRTC else frame
+
+# ==========================================
+# SIDEBAR CONFIGURATION & CONTROLS
+# ==========================================
+with st.sidebar:
+    # Mudra Branding & Logo
+    if os.path.exists("mudralogo.jpg"):
+        st.image("mudralogo.jpg", use_container_width=True)
+    
+    st.markdown("### ⚙️ System Settings")
+    
+    # Camera Mode Switcher
+    camera_mode_options = []
+    if HAS_WEBRTC:
+        camera_mode_options.append("🌐 Web Browser Camera (Cloud / Phone)")
+    camera_mode_options.append("💻 Local Camera (OpenCV)")
+    
+    chosen_camera_mode = st.selectbox(
+        "Camera Mode",
+        options=camera_mode_options,
+        index=0,
+        help="Select 'Web Browser Camera' for hosting on Streamlit Community Cloud and mobile devices. Use 'Local Camera' for direct hardware access on your PC."
     )
     
-    # --- Separate Start and Stop Buttons in columns ---
-    start_col, stop_col = st.sidebar.columns(2)
-
-    if start_col.button("Start Camera", key="start_cam", use_container_width=True, disabled=st.session_state.camera_active):
-        st.session_state.camera_active = True
-        if 'rerun' in dir(st):
-            st.rerun()
-
-    if stop_col.button("Stop Camera", key="stop_cam", use_container_width=True, disabled=not st.session_state.camera_active):
-        st.session_state.camera_active = False
-        # Clear sentence and predictions when camera is stopped manually
-        st.session_state.sentence = []
-        st.session_state.last_prediction = None
-        st.session_state.count = 0
-        if 'rerun' in dir(st):
-            st.rerun()
+    st.markdown("---")
     
-    audio_placeholder = st.sidebar.empty()
-    st.sidebar.markdown("---")
-
-    st.write("Translate Indian Sign Language in real-time. Use the buttons in the sidebar to control the app.")
-
-    # Layout for video feed and static image
-    col1, col2 = st.columns([2, 1])
-    frame_placeholder = col1.empty()
+    # Speech Synthesis Language
+    st.session_state.voice_language = st.selectbox(
+        "🗣️ Speech Output Voice",
+        options=["English", "Hindi", "Marathi"],
+        index=0
+    )
     
-    with col2:
-        try:
-            st.image("Poster_isl.png", caption="ISL Alphabet Chart")
-        except Exception:
-            st.warning("ISL poster not found.")
-
-    # Placeholder for the translated sentence
-    sentence_placeholder = st.empty()
-    sentence_placeholder.markdown(f"### Sentence: `{''.join(st.session_state.sentence)}`")
-
-    # --- Sentence Control Buttons ---
-    st.write("---")
-    # Updated to 4 columns to include the new "Speak" button
-    col3, col4, col5, col6 = st.columns(4)
+    st.markdown("---")
     
-    if col3.button("Add Space", use_container_width=True):
-        st.session_state.sentence.append(" ")
-        st.session_state.last_prediction = " "
+    # Sensitivity & Stability Adjustments
+    with st.expander("🎛️ Gesture Tuning", expanded=False):
+        st.session_state.confidence_threshold = st.slider(
+            "Confidence Cutoff",
+            min_value=0.50,
+            max_value=0.95,
+            value=0.65,
+            step=0.05,
+            help="Higher values reduce false positives."
+        )
+        st.session_state.stability_frames_req = st.slider(
+            "Stability Hold (Frames)",
+            min_value=4,
+            max_value=16,
+            value=8,
+            step=1,
+            help="Number of consecutive stable frames required before registering a letter."
+        )
 
-    if col4.button("Backspace", use_container_width=True) and st.session_state.sentence:
-        st.session_state.sentence.pop()
-        st.session_state.last_prediction = None
+    st.markdown("---")
+    st.markdown("""
+    <div style="text-align: center; color: #64748B; font-size: 0.8rem;">
+        Mudra ISL Engine • v2.0 Signature Edition<br>
+        Crafted by <b style="color: #FBBF24;">Sohail Shaikh</b>
+    </div>
+    """, unsafe_allow_html=True)
 
-    if col5.button("Clear All", use_container_width=True):
-        st.session_state.sentence = []
-        st.session_state.last_prediction = None
+# ==========================================
+# HERO BRAND BANNER
+# ==========================================
+st.markdown("""
+<div class="brand-hero">
+    <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 16px;">
+        <div>
+            <h1 class="brand-title">🤟 MUDRA</h1>
+            <div class="brand-sub">Real-Time Indian Sign Language Translation & Speech Synthesis System</div>
+            <div class="author-pill">⚡ Engineered by Sohail Shaikh</div>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 8px; align-items: flex-end;">
+            <div class="status-badge">🟢 Neural Engine: Active</div>
+            <div style="font-size: 0.8rem; color: #94A3B8;">35 Hand Gestures Supported (A-Z, 1-9)</div>
+        </div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+# ==========================================
+# MAIN WORKSPACE LAYOUT
+# ==========================================
+main_col_left, main_col_right = st.columns([3, 2], gap="large")
+
+# LEFT COLUMN: CAMERA FEED
+with main_col_left:
+    st.markdown("### 📷 Live Camera Feed")
     
-    # New "Speak" button to say the whole sentence
-    if col6.button("Speak", use_container_width=True):
-        full_sentence_str = "".join(st.session_state.sentence).strip()
-        lang_map = {"English": "en", "Hindi": "hi", "Marathi": "mr"}
-        lang_code = lang_map[st.session_state.voice_language]
-        audio_bytes = text_to_speech(full_sentence_str, lang_code)
-        if audio_bytes:
-            audio_placeholder.audio(audio_bytes, format="audio/mp3", autoplay=True)
+    if "Web Browser Camera" in chosen_camera_mode and HAS_WEBRTC:
+        st.caption("📱 WebRTC Stream enabled — Works seamlessly on Chrome, Safari, mobile smartphones & PCs.")
+        
+        rtc_config = RTCConfiguration(
+            {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+        )
+        
+        webrtc_ctx = webrtc_streamer(
+            key="mudra-isl-stream",
+            mode=WebRtcMode.SENDRECV,
+            rtc_configuration=rtc_config,
+            media_stream_constraints={
+                "video": {
+                    "facingMode": "user",
+                    "width": {"ideal": 640},
+                    "height": {"ideal": 480}
+                },
+                "audio": False
+            },
+            video_processor_factory=ISLWebRtcProcessor,
+            async_processing=True,
+        )
 
+        # Pull predictions from processor
+        if webrtc_ctx.video_processor:
+            with webrtc_ctx.video_processor.lock:
+                history = list(webrtc_ctx.video_processor.recent_predictions)
+            
+            # Check stability in sliding window
+            if len(history) >= st.session_state.stability_frames_req:
+                valid_items = [x for x in history if x is not None and x != "-"]
+                if valid_items:
+                    most_common = max(set(valid_items), key=valid_items.count)
+                    if valid_items.count(most_common) >= (st.session_state.stability_frames_req - 2):
+                        if not st.session_state.sentence or st.session_state.sentence[-1] != most_common:
+                            st.session_state.sentence.append(most_common)
+                            st.session_state.last_committed_char = most_common
+                            st.toast(f"Captured: {most_common}", icon="✨")
 
-    # --- Main Application Loop ---
-    if st.session_state.camera_active:
-        cap = cv2.VideoCapture(0)
-        with mp_hands.Hands(
-            model_complexity=0, max_num_hands=1,
-            min_detection_confidence=0.7, min_tracking_confidence=0.7
-        ) as hands:
-            while st.session_state.camera_active and cap.isOpened():
-                ret, frame = cap.read()
-                if not ret:
-                    st.warning("Could not read frame from camera.")
-                    break
-
-                frame = cv2.flip(frame, 1)
-                image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                results = hands.process(image_rgb)
-
-                if results.multi_hand_landmarks:
-                    for hand_landmarks in results.multi_hand_landmarks:
-                        landmark_list = calc_landmark_list(frame, hand_landmarks)
-                        processed_landmarks = pre_process_landmark(landmark_list)
-                        prediction = predict_sign(processed_landmarks)
-
-                        if prediction == st.session_state.last_prediction:
-                            st.session_state.count += 1
-                        else:
-                            st.session_state.count = 1
-                        st.session_state.last_prediction = prediction
-
-                        if st.session_state.count >= 10:
-                            if not st.session_state.sentence or st.session_state.sentence[-1] != prediction:
-                                st.session_state.sentence.append(prediction)
-                            st.session_state.count = 0
-
-                        mp_drawing.draw_landmarks(
-                            frame, hand_landmarks, mp_hands.HAND_CONNECTIONS,
-                            mp_drawing_styles.get_default_hand_landmarks_style(),
-                            mp_drawing_styles.get_default_hand_connections_style()
-                        )
-                        cv2.putText(frame, prediction, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 0, 0), 3, cv2.LINE_AA)
-
-                frame_placeholder.image(frame, channels="BGR")
-                sentence_placeholder.markdown(f"### Sentence: `{''.join(st.session_state.sentence)}`")
-                
-        cap.release()
     else:
-        frame_placeholder.markdown("### Camera is off.\nPress **Start Camera** in the sidebar to begin.")
+        # LOCAL OPENCV CAMERA MODE
+        st.caption("💻 Direct Hardware Stream via OpenCV (For Local Testing)")
+        cam_start_col, cam_stop_col = st.columns(2)
+        
+        start_pressed = cam_start_col.button(
+            "▶️ Start Camera", 
+            key="start_local_cam",
+            use_container_width=True,
+            disabled=st.session_state.local_camera_running
+        )
+        stop_pressed = cam_stop_col.button(
+            "⏹️ Stop Camera",
+            key="stop_local_cam",
+            use_container_width=True,
+            disabled=not st.session_state.local_camera_running
+        )
 
-if __name__ == "__main__":
-    main()
+        if start_pressed:
+            st.session_state.local_camera_running = True
+            st.rerun()
+
+        if stop_pressed:
+            st.session_state.local_camera_running = False
+            st.rerun()
+
+        video_frame_placeholder = st.empty()
+        
+        if st.session_state.local_camera_running:
+            cap = cv2.VideoCapture(0)
+            if not cap.isOpened():
+                st.error("Could not access local webcam. Please check hardware permissions.")
+                st.session_state.local_camera_running = False
+            else:
+                consecutive_count = 0
+                candidate_char = None
+                
+                with mp_hands.Hands(
+                    model_complexity=0,
+                    max_num_hands=1,
+                    min_detection_confidence=0.7,
+                    min_tracking_confidence=0.7
+                ) as hands:
+                    while st.session_state.local_camera_running and cap.isOpened():
+                        ret, frame = cap.read()
+                        if not ret:
+                            st.warning("Webcam stream disconnected.")
+                            break
+
+                        frame = cv2.flip(frame, 1)
+                        img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        results = hands.process(img_rgb)
+
+                        current_pred = "-"
+                        current_conf = 0.0
+
+                        if results.multi_hand_landmarks:
+                            for hand_landmarks in results.multi_hand_landmarks:
+                                landmark_list = calc_landmark_list(frame, hand_landmarks)
+                                norm_vector = pre_process_landmark(landmark_list)
+                                current_pred, current_conf = predict_sign(norm_vector)
+
+                                mp_drawing.draw_landmarks(
+                                    frame,
+                                    hand_landmarks,
+                                    mp_hands.HAND_CONNECTIONS,
+                                    mp_drawing.DrawingSpec(color=(245, 158, 11), thickness=2, circle_radius=3),
+                                    mp_drawing.DrawingSpec(color=(6, 182, 212), thickness=2)
+                                )
+
+                                # HUD banner on frame
+                                cv2.rectangle(frame, (15, 15), (210, 85), (15, 23, 42), -1)
+                                cv2.rectangle(frame, (15, 15), (210, 85), (245, 158, 11), 2)
+                                cv2.putText(frame, f"{current_pred}", (30, 70), cv2.FONT_HERSHEY_DUPLEX, 1.8, (245, 158, 11), 3)
+                                cv2.putText(frame, f"{int(current_conf*100)}%", (125, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (6, 182, 212), 2)
+
+                                # Stability debouncing
+                                if current_pred != "-" and current_conf >= st.session_state.confidence_threshold:
+                                    if current_pred == candidate_char:
+                                        consecutive_count += 1
+                                    else:
+                                        candidate_char = current_pred
+                                        consecutive_count = 1
+
+                                    if consecutive_count >= st.session_state.stability_frames_req:
+                                        if not st.session_state.sentence or st.session_state.sentence[-1] != candidate_char:
+                                            st.session_state.sentence.append(candidate_char)
+                                        consecutive_count = 0
+                                else:
+                                    consecutive_count = 0
+                                    candidate_char = None
+
+                        video_frame_placeholder.image(frame, channels="BGR", use_container_width=True)
+                cap.release()
+        else:
+            video_frame_placeholder.markdown("""
+            <div style="background: rgba(17, 24, 39, 0.6); border: 2px dashed rgba(245, 158, 11, 0.3); border-radius: 14px; padding: 60px 20px; text-align: center;">
+                <div style="font-size: 3rem;">📹</div>
+                <h4 style="color: #FBBF24; margin-top: 12px;">Camera is Idle</h4>
+                <p style="color: #94A3B8; max-width: 400px; margin: 0 auto;">Click <b>Start Camera</b> above to initiate real-time gesture recognition.</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+# RIGHT COLUMN: SENTENCE STUDIO & CONTROLS
+with main_col_right:
+    st.markdown("### ✍️ Sentence Studio")
+    
+    # Render constructed sentence
+    sentence_tokens = st.session_state.sentence
+    if sentence_tokens:
+        tokens_html = ""
+        for token in sentence_tokens:
+            if token == " ":
+                tokens_html += '<span class="space-token">␣ SPACE</span>'
+            else:
+                tokens_html += f'<span class="letter-token">{token}</span>'
+        sentence_str = "".join(sentence_tokens)
+    else:
+        tokens_html = '<span style="color: #64748B; font-style: italic;">No gestures recognized yet. Make a sign in front of the camera...</span>'
+        sentence_str = ""
+
+    st.markdown(f"""
+    <div class="sentence-display-box">
+        {tokens_html}
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Action Toolbar
+    st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+    btn_col1, btn_col2, btn_col3 = st.columns(3)
+    
+    if btn_col1.button("␣ Space", use_container_width=True):
+        st.session_state.sentence.append(" ")
+        st.rerun()
+
+    if btn_col2.button("⌫ Backspace", use_container_width=True):
+        if st.session_state.sentence:
+            st.session_state.sentence.pop()
+            st.rerun()
+
+    if btn_col3.button("🗑️ Clear All", use_container_width=True):
+        st.session_state.sentence = []
+        st.rerun()
+
+    st.markdown("---")
+
+    # Speech Synthesis & Translation Studio
+    st.markdown("### 🔊 Voice & Translation Studio")
+    audio_col1, audio_col2 = st.columns([1, 1])
+
+    speak_clicked = audio_col1.button("🎙️ Speak Sentence", kind="primary", use_container_width=True)
+    copy_clicked = audio_col2.button("📋 Copy Text", use_container_width=True)
+
+    if copy_clicked and sentence_str:
+        st.toast(f"Copied to clipboard: \"{sentence_str}\"", icon="📋")
+
+    if speak_clicked:
+        if sentence_str.strip():
+            with st.spinner(f"Generating audio in {st.session_state.voice_language}..."):
+                audio_bytes, translated_output = translate_and_speak(sentence_str, st.session_state.voice_language)
+                if audio_bytes:
+                    st.success(f"🗣️ Speaking in {st.session_state.voice_language}: **{translated_output}**")
+                    st.audio(audio_bytes, format="audio/mp3", autoplay=True)
+                else:
+                    st.warning("Audio synthesis could not complete. Check internet connection.")
+        else:
+            st.warning("Sentence is empty. Record some signs before speaking!")
+
+# ==========================================
+# INTERACTIVE ISL REFERENCE CHEATSHEET
+# ==========================================
+st.markdown("<div style='height: 20px;'></div>", unsafe_allow_html=True)
+with st.expander("📖 Indian Sign Language (ISL) Interactive Alphabet Cheatsheet", expanded=False):
+    st.markdown("""
+    Learn the 35 recognized gestures. Ensure your hand is well-lit, clearly facing the camera, and positioned within the frame.
+    """)
+    
+    tab_signs, tab_poster, tab_tips = st.tabs(["🔤 Alphabet & Digits Grid", "🖼️ Official ISL Poster", "💡 Best Recognition Tips"])
+    
+    with tab_signs:
+        digits = [str(i) for i in range(1, 10)]
+        letters = list(string.ascii_uppercase)
+        
+        st.markdown("**Numbers (1 to 9):**")
+        d_cols = st.columns(9)
+        for i, d in enumerate(digits):
+            d_cols[i].markdown(f"<div style='text-align:center; padding: 10px; background: rgba(245, 158, 11, 0.15); border-radius: 8px; font-weight:700; color: #FBBF24;'>{d}</div>", unsafe_allow_html=True)
+
+        st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+        st.markdown("**Alphabet (A to Z):**")
+        
+        # 13 columns per row for 26 letters
+        row1_cols = st.columns(13)
+        for i, char in enumerate(letters[:13]):
+            row1_cols[i].markdown(f"<div style='text-align:center; padding: 8px; background: rgba(6, 182, 212, 0.15); border-radius: 8px; font-weight:700; color: #38BDF8;'>{char}</div>", unsafe_allow_html=True)
+
+        st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+        row2_cols = st.columns(13)
+        for i, char in enumerate(letters[13:]):
+            row2_cols[i].markdown(f"<div style='text-align:center; padding: 8px; background: rgba(6, 182, 212, 0.15); border-radius: 8px; font-weight:700; color: #38BDF8;'>{char}</div>", unsafe_allow_html=True)
+
+    with tab_poster:
+        if os.path.exists("Poster_isl.png"):
+            st.image("Poster_isl.png", caption="Indian Sign Language Gesture Chart", use_container_width=True)
+        else:
+            st.info("Poster image 'Poster_isl.png' not found.")
+
+    with tab_tips:
+        st.markdown("""
+        - **Lighting Matters:** Ensure your hand is front-lit and not back-lit by a window or lamp.
+        - **Hand Stability:** Hold each sign firmly for ~0.5 seconds to trigger the stability hold engine.
+        - **Frame Position:** Keep your hand centered in the frame, 1 to 2 feet away from the lens.
+        - **Transitions:** Move your hand smoothly between signs to prevent intermediate transitional frames.
+        """)
+
+# ==========================================
+# FOOTER
+# ==========================================
+st.markdown("""
+<div style="text-align: center; margin-top: 40px; padding: 24px; color: #64748B; font-size: 0.85rem; border-top: 1px solid rgba(255, 255, 255, 0.08);">
+    <b>Mudra: ISL Translator</b> • Engineered by <b>Sohail Shaikh</b><br>
+    Powered by MediaPipe Hands, TensorFlow, and Streamlit Community Cloud
+</div>
+""", unsafe_allow_html=True)
